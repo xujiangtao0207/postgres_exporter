@@ -28,6 +28,7 @@ type ProbeCollector struct {
 	collectors map[string]Collector
 	logger     log.Logger
 	db         *sql.DB
+	labels     prometheus.Labels
 }
 
 func NewProbeCollector(logger log.Logger, excludeDatabases []string, registry *prometheus.Registry, dsn config.DSN) (*ProbeCollector, error) {
@@ -81,7 +82,7 @@ func (pc *ProbeCollector) Collect(ch chan<- prometheus.Metric) {
 	wg.Add(len(pc.collectors))
 	for name, c := range pc.collectors {
 		go func(name string, c Collector) {
-			execute(context.TODO(), name, c, pc.db, ch, pc.logger)
+			execute(context.TODO(), name, c, pc.labels, pc.db, ch, pc.logger)
 			wg.Done()
 		}(name, c)
 	}

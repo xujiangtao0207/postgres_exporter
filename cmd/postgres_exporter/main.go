@@ -69,8 +69,12 @@ const (
 )
 
 func main() {
+
+
 	kingpin.Version(version.Print(exporterName))
 	promlogConfig := &promlog.Config{}
+
+
 	flag.AddFlags(kingpin.CommandLine, promlogConfig)
 	kingpin.HelpFlag.Short('h')
 	kingpin.Parse()
@@ -115,15 +119,15 @@ func main() {
 	prometheus.MustRegister(exporter)
 
 	// TODO(@sysadmind): Remove this with multi-target support. We are removing multiple DSN support
-	dsn := ""
-	if len(dsns) > 0 {
-		dsn = dsns[0]
-	}
+	//dsn := ""
+	//if len(dsns) > 0 {
+	//	dsn = dsns[0]
+	//}
 
 	pe, err := collector.NewPostgresCollector(
 		logger,
 		excludedDatabases,
-		dsn,
+		dsns,
 		[]string{},
 	)
 	if err != nil {

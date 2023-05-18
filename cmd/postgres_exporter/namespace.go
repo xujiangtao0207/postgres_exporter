@@ -158,6 +158,7 @@ func queryNamespaceMapping(server *Server, namespace string, mapping MetricMapNa
 						nonfatalErrors = append(nonfatalErrors, errors.New(fmt.Sprintln("Unexpected error parsing column: ", namespace, columnName, columnData[idx])))
 						continue
 					}
+
 					// Generate the metric
 					metric = prometheus.MustNewConstMetric(metricMapping.desc, metricMapping.vtype, value, labels...)
 				}
@@ -191,7 +192,6 @@ func queryNamespaceMappings(ch chan<- prometheus.Metric, server *Server) map[str
 
 	for namespace, mapping := range server.metricMap {
 		level.Debug(logger).Log("msg", "Querying namespace", "namespace", namespace)
-
 		if mapping.master && !server.master {
 			level.Debug(logger).Log("msg", "Query skipped...")
 			continue

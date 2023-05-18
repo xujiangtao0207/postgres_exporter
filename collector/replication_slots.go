@@ -37,21 +37,21 @@ var pgReplicationSlot = map[string]*prometheus.Desc{
 	"current_wal_lsn": prometheus.NewDesc(
 		"pg_replication_slot_current_wal_lsn",
 		"current wal lsn value",
-		[]string{"slot_name"}, nil,
+		[]string{"slot_name", serverLabelName}, nil,
 	),
 	"confirmed_flush_lsn": prometheus.NewDesc(
 		"pg_replication_slot_confirmed_flush_lsn",
 		"last lsn confirmed flushed to the replication slot",
-		[]string{"slot_name"}, nil,
+		[]string{"slot_name", serverLabelName}, nil,
 	),
 	"is_active": prometheus.NewDesc(
 		"pg_replication_slot_is_active",
 		"last lsn confirmed flushed to the replication slot",
-		[]string{"slot_name"}, nil,
+		[]string{"slot_name", serverLabelName}, nil,
 	),
 }
 
-func (PGReplicationSlotCollector) Update(ctx context.Context, db *sql.DB, ch chan<- prometheus.Metric) error {
+func (PGReplicationSlotCollector) Update(ctx context.Context, labels prometheus.Labels, db *sql.DB, ch chan<- prometheus.Metric) error {
 	rows, err := db.QueryContext(ctx,
 		`SELECT
 			slot_name,
@@ -76,17 +76,17 @@ func (PGReplicationSlotCollector) Update(ctx context.Context, db *sql.DB, ch cha
 
 		ch <- prometheus.MustNewConstMetric(
 			pgReplicationSlot["current_wal_lsn"],
-			prometheus.GaugeValue, float64(wal_lsn), slot_name,
+			prometheus.GaugeValue, float64(wal_lsn), slot_name, labels[serverLabelName],
 		)
 		if is_active {
 			ch <- prometheus.MustNewConstMetric(
 				pgReplicationSlot["confirmed_flush_lsn"],
-				prometheus.GaugeValue, float64(flush_lsn), slot_name,
+				prometheus.GaugeValue, float64(flush_lsn), slot_name, labels[serverLabelName],
 			)
 		}
 		ch <- prometheus.MustNewConstMetric(
 			pgReplicationSlot["is_active"],
-			prometheus.GaugeValue, float64(flush_lsn), slot_name,
+			prometheus.GaugeValue, float64(flush_lsn), slot_name, labels[serverLabelName],
 		)
 	}
 	if err := rows.Err(); err != nil {

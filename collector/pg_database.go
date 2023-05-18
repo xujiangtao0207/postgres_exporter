@@ -30,6 +30,10 @@ type PGDatabaseCollector struct {
 	excludedDatabases []string
 }
 
+const (
+	serverLabelName = "server"
+)
+
 func NewPGDatabaseCollector(config collectorConfig) (Collector, error) {
 	exclude := config.excludeDatabases
 	if exclude == nil {
@@ -45,8 +49,19 @@ var pgDatabase = map[string]*prometheus.Desc{
 	"size_bytes": prometheus.NewDesc(
 		"pg_database_size_bytes",
 		"Disk space used by the database",
-		[]string{"datname"}, nil,
+		[]string{"datname", serverLabelName}, nil,
 	),
+	"xid_ages": prometheus.NewDesc(
+		"pg_database_xid_ages",
+		"Age by the database",
+		[]string{"datname", serverLabelName}, nil,
+	),
+}
+
+type PGDatabase struct {
+	DatName string
+	Size    int64
+	Age     int64
 }
 
 // Update implements Collector and exposes database size.
@@ -57,49 +72,38 @@ var pgDatabase = map[string]*prometheus.Desc{
 // each database individually. This is because we can't filter the
 // list of databases in the query because the list of excluded
 // databases is dynamic.
-func (c PGDatabaseCollector) Update(ctx context.Context, db *sql.DB, ch chan<- prometheus.Metric) error {
+func (c PGDatabaseCollector) Update(ctx context.Context, labels prometheus.Labels, db *sql.DB, ch chan<- prometheus.Metric) error {
 	// Query the list of databases
 	rows, err := db.QueryContext(ctx,
 		`SELECT pg_database.datname
-		FROM pg_database;
-		`,
+		,pg_database_size(pg_database.datname)
+        ,age(datfrozenxid)
+		FROM pg_database;`,
 	)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 
-	var databases []string
-
 	for rows.Next() {
-		var datname string
-		if err := rows.Scan(&datname); err != nil {
-			return err
-		}
 
-		// Ignore excluded databases
-		// Filtering is done here instead of in the query to avoid
-		// a complicated NOT IN query with a variable number of parameters
-		if sliceContains(c.excludedDatabases, datname) {
-			continue
-		}
-
-		databases = append(databases, datname)
-	}
-
-	// Query the size of the databases
-	for _, datname := range databases {
-		var size int64
-		err = db.QueryRowContext(ctx, "SELECT pg_database_size($1)", datname).Scan(&size)
-		if err != nil {
+		var database PGDatabase
+		if err := rows.Scan(&database.DatName, &database.Size, &database.Age); err != nil {
 			return err
 		}
 
 		ch <- prometheus.MustNewConstMetric(
 			pgDatabase["size_bytes"],
-			prometheus.GaugeValue, float64(size), datname,
+			prometheus.GaugeValue, float64(database.Size), database.DatName, labels[serverLabelName],
 		)
+
+		ch <- prometheus.MustNewConstMetric(
+			pgDatabase["xid_ages"],
+			prometheus.GaugeValue, float64(database.Age), database.DatName, labels[serverLabelName],
+		)
+
 	}
+
 	if err := rows.Err(); err != nil {
 		return err
 	}

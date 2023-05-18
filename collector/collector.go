@@ -18,6 +18,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/lib/pq"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,19 +49,19 @@ var (
 	scrapeDurationDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "scrape", "collector_duration_seconds"),
 		"postgres_exporter: Duration of a collector scrape.",
-		[]string{"collector"},
+		[]string{"collector", serverLabelName},
 		nil,
 	)
 	scrapeSuccessDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "scrape", "collector_success"),
 		"postgres_exporter: Whether a collector succeeded.",
-		[]string{"collector"},
+		[]string{"collector", serverLabelName},
 		nil,
 	)
 )
 
 type Collector interface {
-	Update(ctx context.Context, db *sql.DB, ch chan<- prometheus.Metric) error
+	Update(ctx context.Context, labels prometheus.Labels, db *sql.DB, ch chan<- prometheus.Metric) error
 }
 
 type collectorConfig struct {
@@ -92,13 +94,15 @@ type PostgresCollector struct {
 	Collectors map[string]Collector
 	logger     log.Logger
 
-	db *sql.DB
+	dbs []*sql.DB
+
+	labels []prometheus.Labels
 }
 
 type Option func(*PostgresCollector) error
 
 // NewPostgresCollector creates a new PostgresCollector.
-func NewPostgresCollector(logger log.Logger, excludeDatabases []string, dsn string, filters []string, options ...Option) (*PostgresCollector, error) {
+func NewPostgresCollector(logger log.Logger, excludeDatabases []string, dsns []string, filters []string, options ...Option) (*PostgresCollector, error) {
 	p := &PostgresCollector{
 		logger: logger,
 	}
@@ -145,18 +149,29 @@ func NewPostgresCollector(logger log.Logger, excludeDatabases []string, dsn stri
 
 	p.Collectors = collectors
 
-	if dsn == "" {
+	if len(dsns) == 0 {
 		return nil, errors.New("empty dsn")
 	}
 
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	for _, dsn := range dsns {
+		db, err := sql.Open("postgres", dsn)
+		if err != nil {
+			return nil, err
+		}
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
 
-	p.db = db
+		p.dbs = append(p.dbs, db)
+
+		fingerprint, err := parseFingerprint(dsn)
+		if err != nil {
+			return nil, err
+		}
+
+		p.labels = append(p.labels, prometheus.Labels{
+			serverLabelName: fingerprint,
+		})
+	}
 
 	return p, nil
 }
@@ -174,16 +189,18 @@ func (p PostgresCollector) Collect(ch chan<- prometheus.Metric) {
 	wg.Add(len(p.Collectors))
 	for name, c := range p.Collectors {
 		go func(name string, c Collector) {
-			execute(ctx, name, c, p.db, ch, p.logger)
+			for i := 0; i < len(p.dbs); i++ {
+				execute(ctx, name, c, p.labels[i], p.dbs[i], ch, p.logger)
+			}
 			wg.Done()
 		}(name, c)
 	}
 	wg.Wait()
 }
 
-func execute(ctx context.Context, name string, c Collector, db *sql.DB, ch chan<- prometheus.Metric, logger log.Logger) {
+func execute(ctx context.Context, name string, c Collector, labels prometheus.Labels, db *sql.DB, ch chan<- prometheus.Metric, logger log.Logger) {
 	begin := time.Now()
-	err := c.Update(ctx, db, ch)
+	err := c.Update(ctx, labels, db, ch)
 	duration := time.Since(begin)
 	var success float64
 
@@ -198,8 +215,8 @@ func execute(ctx context.Context, name string, c Collector, db *sql.DB, ch chan<
 		level.Debug(logger).Log("msg", "collector succeeded", "name", name, "duration_seconds", duration.Seconds())
 		success = 1
 	}
-	ch <- prometheus.MustNewConstMetric(scrapeDurationDesc, prometheus.GaugeValue, duration.Seconds(), name)
-	ch <- prometheus.MustNewConstMetric(scrapeSuccessDesc, prometheus.GaugeValue, success, name)
+	ch <- prometheus.MustNewConstMetric(scrapeDurationDesc, prometheus.GaugeValue, duration.Seconds(), name, labels[serverLabelName])
+	ch <- prometheus.MustNewConstMetric(scrapeSuccessDesc, prometheus.GaugeValue, success, name, labels[serverLabelName])
 }
 
 // collectorFlagAction generates a new action function for the given collector
@@ -219,4 +236,40 @@ var ErrNoData = errors.New("collector returned no data")
 
 func IsNoDataError(err error) bool {
 	return err == ErrNoData
+}
+
+func parseFingerprint(url string) (string, error) {
+	dsn, err := pq.ParseURL(url)
+	if err != nil {
+		dsn = url
+	}
+
+	pairs := strings.Split(dsn, " ")
+	kv := make(map[string]string, len(pairs))
+	for _, pair := range pairs {
+		splitted := strings.SplitN(pair, "=", 2)
+		if len(splitted) != 2 {
+			return "", fmt.Errorf("malformed dsn %q", dsn)
+		}
+		// Newer versions of pq.ParseURL quote values so trim them off if they exist
+		key := strings.Trim(splitted[0], "'\"")
+		value := strings.Trim(splitted[1], "'\"")
+		kv[key] = value
+	}
+
+	var fingerprint string
+
+	if host, ok := kv["host"]; ok {
+		fingerprint += host
+	} else {
+		fingerprint += "localhost"
+	}
+
+	if port, ok := kv["port"]; ok {
+		fingerprint += ":" + port
+	} else {
+		fingerprint += ":5432"
+	}
+
+	return fingerprint, nil
 }
